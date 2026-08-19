@@ -14,10 +14,27 @@ export const prefersReducedMotion = window.matchMedia(
 
 const STORAGE_KEY = 'ahmar-portfolio';
 
-/** Sections whose content is revealed. Scrolling to one is enough. */
+/**
+ * How long the page waits after a crate breaks before it scrolls down to the
+ * section that crate unlocked. Long enough to watch the shards fly, tumble
+ * and land — scrolling away mid-explosion throws away the best moment in the
+ * whole playfield.
+ */
+const BREAK_TO_SCROLL_MS = 1650;
+
+/** Sections whose content is revealed. Scrolling to one is enough. This is
+ *  the half that persists: content you have already opened stays open. */
 const unlocked = new Set();
-/** Crates actually shot down. This is game progress, and it is separate:
- *  a visitor who only scrolls should still find a full board next time. */
+/**
+ * Crates actually shot down. Deliberately *not* persisted — the board is a
+ * game, and every visit starts with a full one. Restoring it across visits
+ * only ever emptied the playfield before the visitor had seen it, and it
+ * bought nothing: `unlocked` already keeps their sections readable, so a
+ * full board asks them to replay nothing.
+ *
+ * It still has to survive an orientation change within a single visit,
+ * which is why it is tracked at all.
+ */
 const broken = new Set();
 
 /* ── persistence ──────────────────────────────────────────────── */
@@ -28,7 +45,7 @@ function loadState() {
     if (!raw) return;
     const saved = JSON.parse(raw);
     if (Array.isArray(saved.unlocked)) saved.unlocked.forEach((id) => unlocked.add(id));
-    if (Array.isArray(saved.broken)) saved.broken.forEach((id) => broken.add(id));
+    // `saved.broken` from older versions is ignored on purpose; see above.
     if (saved.theme === 'light') document.documentElement.classList.add('light');
   } catch {
     /* private mode or corrupt value — defaults are fine */
@@ -41,7 +58,6 @@ function saveState() {
       STORAGE_KEY,
       JSON.stringify({
         unlocked: [...unlocked],
-        broken: [...broken],
         theme: document.documentElement.classList.contains('light') ? 'light' : 'dark',
       })
     );
@@ -73,20 +89,27 @@ export function unlockSection(id, scrollTo = true) {
   applyUnlockClass(id);
   saveState();
 
-  if (isNew) {
+  // The entrance pulse has to start when the section comes into view, not
+  // when it was unlocked — held back until the scroll, it would otherwise
+  // play and finish while the visitor is still watching the crate explode.
+  const pulse = () => {
+    if (!isNew) return;
     el.classList.add('is-just-hit');
     setTimeout(() => el.classList.remove('is-just-hit'), 1200);
-  }
+  };
 
   if (scrollTo) {
-    // Let the crate visibly break before the page moves.
-    const delay = prefersReducedMotion ? 0 : 620;
+    // Let the crate visibly break, and its debris settle, before the page moves.
+    const delay = prefersReducedMotion ? 0 : BREAK_TO_SCROLL_MS;
     setTimeout(() => {
+      pulse();
       el.scrollIntoView({
         behavior: prefersReducedMotion ? 'auto' : 'smooth',
         block: 'start',
       });
     }, delay);
+  } else {
+    pulse();
   }
 
   document.dispatchEvent(
@@ -109,24 +132,20 @@ export function unlockAll(scrollTo = false) {
 /** Records that a crate was shot down, as distinct from merely scrolled to. */
 export function markBroken(id) {
   broken.add(id);
-  saveState();
 }
 export const isBroken = (id) => broken.has(id);
-export const brokenCount = () =>
-  [...broken].filter((id) => !sections.find((s) => s.id === id)?.hidden).length;
+export const brokenCount = () => broken.size;
+/** Called when the board is re-hung, so the HUD counter matches what hangs. */
 export function clearBroken() {
   broken.clear();
-  saveState();
 }
 
 /* ── nav, theme, chrome ───────────────────────────────────────── */
 
 function initNav() {
-  const topbar = document.getElementById('topbar');
   const menu = document.getElementById('mobileMenu');
   const hamburger = document.getElementById('hamburger');
   const progress = document.getElementById('pageProgress');
-  const playfield = document.querySelector('.playfield');
 
   const closeMenu = () => {
     menu.classList.remove('is-open');
@@ -147,13 +166,6 @@ function initNav() {
   menu.addEventListener('click', (e) => {
     if (e.target.matches('.mobile-link')) closeMenu();
   });
-
-  // The top bar only appears once you've scrolled past the playfield.
-  const barObserver = new IntersectionObserver(
-    ([entry]) => topbar.classList.toggle('is-visible', !entry.isIntersecting),
-    { threshold: 0.35 }
-  );
-  if (playfield) barObserver.observe(playfield);
 
   // Any nav link to a locked section unlocks it — the game is never a gate.
   document.addEventListener('click', (e) => {

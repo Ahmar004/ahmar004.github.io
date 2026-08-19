@@ -4,4 +4,4 @@ dist/
 *.local
 .vite/
 
-tools/shots/
+tools/shots*/

@@ -12,7 +12,7 @@ import { detectQuality, makePerfWatchdog } from './quality.js';
 import { createMaterials, createBird } from './objects.js';
 import { addLights, buildScenery, layoutFor, LAYOUTS } from './world.js';
 import { CrateField } from './crates.js';
-import { Slingshot } from './slingshot.js';
+import { Slingshot, OVERLAY_LAYER } from './slingshot.js';
 import { sfx, setMuted, isMuted } from './sound.js';
 import {
   unlockSection,
@@ -42,6 +42,9 @@ export function startGame(canvas) {
     powerPreference: 'high-performance',
   });
   renderer.setClearAlpha(0);
+  // The frame draws the world and then the slingshot over it, so the passes
+  // are cleared by hand.
+  renderer.autoClear = false;
   renderer.outputColorSpace = THREE.SRGBColorSpace;
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
   renderer.toneMappingExposure = 1.28;
@@ -90,6 +93,11 @@ export function startGame(canvas) {
   let layout = layoutFor(window.innerWidth / window.innerHeight);
 
   const lights = addLights(scene, quality, layout);
+  // Every light has to reach the overlay layer too, or the pass that draws
+  // the slingshot renders it in the dark.
+  scene.traverse((o) => {
+    if (o.isLight) o.layers.enableAll();
+  });
   let scenery = buildScenery(scene, world, materials, layout, quality);
 
   const hud = {
@@ -117,43 +125,65 @@ export function startGame(canvas) {
   refreshCount();
 
   const crates = new CrateField(
-    { scene, world, materials, layout, quality, onGraze: () => sfx.thud() },
+    {
+      scene,
+      world,
+      materials,
+      layout,
+      quality,
+      onGraze: () => sfx.thud(),
+      onDamage: handleDamage,
+    },
     handleBreak
   );
 
-  // Crates for sections already revealed in a previous visit start knocked
-  // down, so returning visitors aren't asked to replay the game.
+  // Re-applies the crates knocked down earlier in this visit. The board is
+  // rebuilt from scratch when the device rotates between portrait and
+  // landscape, and crates you already shot must not come back.
+  //
+  // This is a restore, not gameplay: it must not replay the break — no
+  // debris, no sound, and above all no scroll, or the page jumps somewhere
+  // the visitor never asked to go. Game progress is not persisted across
+  // visits, so on load this is a no-op and the board hangs full.
   function syncBoardToProgress() {
     crates.crates.forEach((crate) => {
-      if (isBroken(crate.id)) crates.break(crate, null);
+      if (isBroken(crate.id)) crates.break(crate, null, { silent: true });
     });
-    if (crates.remaining === 0) {
-      crates.revealHidden();
-      crates.crates.forEach((crate) => {
-        if (isBroken(crate.id)) crates.break(crate, null);
-      });
-    }
   }
   syncBoardToProgress();
 
   let slingshot = new Slingshot(scene, materials, layout, quality, GRAVITY);
 
-  function handleBreak(crate) {
-    sfx.crack();
-    setTimeout(() => sfx.chime(), 160);
+  /** A crate took a solid hit and cracked, but is still hanging. */
+  function handleDamage(crate, { left }) {
+    sfx.splinter();
+    const label = crate.section.label.toLowerCase();
+    say(
+      left === 1
+        ? `${label} is splintering · one more hit`
+        : `${label} cracked · ${left} more hits`,
+      2800
+    );
+  }
+
+  function handleBreak(crate, { silent = false } = {}) {
     markBroken(crate.id);
-    unlockSection(crate.id, true);
     refreshCount();
 
+    if (silent) {
+      // Restoring saved progress on load: reveal the section in place and
+      // leave the visitor exactly where they are.
+      unlockSection(crate.id, false);
+      return;
+    }
+
+    sfx.crack();
+    setTimeout(() => sfx.chime(), 160);
+    unlockSection(crate.id, true);
+
     const left = crates.remaining;
-    if (left === 0 && !crate.section.hidden) {
-      if (crates.revealHidden()) {
-        say('Board cleared — and something else just dropped in. 👀', 7000);
-      } else {
-        say('Every crate down. Scroll on.', 6000);
-      }
-    } else if (crate.section.hidden) {
-      say('You found it. Nice shooting.', 6000);
+    if (left === 0) {
+      say('Board cleared. Every section is open — scroll on.', 6000);
     } else {
       say(`${crate.section.label.toLowerCase()} unlocked · ${left} to go`, 3200);
     }
@@ -163,6 +193,19 @@ export function startGame(canvas) {
 
   let birdIndex = 0;
   let bird = null; // { mesh, body|null, launchedAt, restingSince }
+
+  /**
+   * Yaw that turns a bird — modelled beak-along-+X — to look the visitor in
+   * the eye. It aims at the camera rather than simply a quarter turn out of
+   * the scene, because the slingshot stands far to the left of frame and a
+   * fixed turn would leave the bird staring past them.
+   *
+   * It wears this for as long as it sits in the pouch; once fired it takes
+   * its orientation from the physics body and tumbles freely.
+   */
+  function facingCamera(position) {
+    return Math.atan2(-(cameraHome.z - position.z), cameraHome.x - position.x);
+  }
   const trailPositions = new Float32Array(24 * 3);
   const trailGeo = new THREE.BufferGeometry();
   trailGeo.setAttribute('position', new THREE.BufferAttribute(trailPositions, 3));
@@ -182,9 +225,34 @@ export function startGame(canvas) {
   scene.add(trail);
   let trailCursor = 0;
 
+  /**
+   * White dots read well against the dusk sky and vanish against the light
+   * theme's, so the aim preview and the flight trail both switch to ink with
+   * the toggle.
+   */
+  const DOT_COLOUR = { dark: 0xffffff, light: 0x0b1220 };
+  let lightTheme = document.documentElement.classList.contains('light');
+
+  function applyDotTheme() {
+    const hex = lightTheme ? DOT_COLOUR.light : DOT_COLOUR.dark;
+    trail.material.color.setHex(hex);
+    trail.material.opacity = lightTheme ? 0.58 : 0.4;
+    slingshot.setDotColour(hex);
+  }
+  applyDotTheme();
+
+  document.addEventListener('theme:changed', (event) => {
+    lightTheme = event.detail.light;
+    applyDotTheme();
+  });
+
   function loadBird() {
     const mesh = createBird(BIRD_RADIUS, birdIndex++);
     mesh.position.copy(slingshot.pouch);
+    mesh.rotation.set(0, facingCamera(mesh.position), 0);
+    // Sitting in the pouch, the bird belongs to the stand and is drawn with
+    // it — otherwise the prongs it nestles between would cover it.
+    mesh.traverse((o) => o.layers.set(OVERLAY_LAYER));
     scene.add(mesh);
     bird = { mesh, body: null, launchedAt: 0, restingSince: 0 };
     trail.visible = false;
@@ -201,10 +269,17 @@ export function startGame(canvas) {
       angularDamping: 0.12,
     });
     body.position.set(bird.mesh.position.x, bird.mesh.position.y, bird.mesh.position.z);
+    // Carries the aiming pose into the flight, so the bird spins on from
+    // where it was rather than snapping side-on at the moment of release.
+    const q = bird.mesh.quaternion;
+    body.quaternion.set(q.x, q.y, q.z, q.w);
     body.velocity.set(velocity.x, velocity.y, velocity.z);
     body.angularVelocity.set(0, 0, -velocity.x * 0.4);
     body.userData = { isProjectile: true };
     world.addBody(body);
+
+    // In flight it is part of the world again, so crates can pass in front.
+    bird.mesh.traverse((o) => o.layers.set(0));
 
     bird.body = body;
     bird.launchedAt = performance.now();
@@ -280,9 +355,9 @@ export function startGame(canvas) {
     slingshot.setPouch(drawn);
     bird.mesh.position.copy(drawn);
 
-    // Point the bird along its launch vector.
+    // Still facing the visitor, but tipping its head along the launch angle.
     const v = slingshot.launchVelocity;
-    bird.mesh.rotation.z = Math.atan2(v.y, v.x);
+    bird.mesh.rotation.set(0, facingCamera(drawn), Math.atan2(v.y, v.x));
 
     slingshot.showTrajectory();
 
@@ -302,6 +377,7 @@ export function startGame(canvas) {
     if (slingshot.power < 0.08) {
       slingshot.release();
       bird.mesh.position.copy(slingshot.rest);
+      bird.mesh.rotation.set(0, facingCamera(slingshot.rest), 0);
       return;
     }
     const velocity = slingshot.launchVelocity;
@@ -337,6 +413,7 @@ export function startGame(canvas) {
     const drawn = slingshot.clampDraw(slingshot.rest.clone().add(offset));
     slingshot.setPouch(drawn);
     bird.mesh.position.copy(drawn);
+    bird.mesh.rotation.set(0, facingCamera(drawn), keyAngle);
     slingshot.showTrajectory();
   }
 
@@ -371,6 +448,10 @@ export function startGame(canvas) {
   hud.reset.addEventListener('click', () => {
     sfx.unlock();
     sfx.reset();
+    // Every crate hangs again, so the shot-down tally has to go with them —
+    // otherwise the HUD reads "6 / 6 knocked down" over a full board, and
+    // the next orientation change would silently clear it all over again.
+    clearBroken();
     crates.reset();
     refreshCount();
     say('Crates re-hung. Everything you already opened stays open.', 3600);
@@ -391,6 +472,22 @@ export function startGame(canvas) {
 
   /* ── resize & camera framing ──────────────────────────────── */
 
+  /** Sky left showing between the bottom of the top bar and the beam. */
+  const SKY_GAP_PX = 14;
+
+  /** How much of the canvas the fixed top bar covers, as a fraction. */
+  function barCoverage(height) {
+    const bar = document.getElementById('topbar')?.getBoundingClientRect().height ?? 60;
+    // Capped, so a very short window can never squeeze the scene to nothing.
+    return Math.min((bar + SKY_GAP_PX) / height, 0.3);
+  }
+
+  /**
+   * Frames the layout bounds inside the part of the canvas the top bar does
+   * *not* cover, and hangs the top of those bounds directly under the bar.
+   * The bar sits over the canvas, so without this the beam the crates hang
+   * from is the first thing it hides.
+   */
   function fitCamera() {
     const width = canvas.clientWidth || window.innerWidth;
     const height = canvas.clientHeight || window.innerHeight;
@@ -398,18 +495,32 @@ export function startGame(canvas) {
 
     const b = layout.bounds;
     const cx = (b.minX + b.maxX) / 2;
-    const cy = (b.minY + b.maxY) / 2;
+    const hidden = barCoverage(height);
 
     const vFov = THREE.MathUtils.degToRad(camera.fov);
-    const distV = (b.maxY - b.minY) / 2 / Math.tan(vFov / 2);
+    // Framed as if the scene were taller by whatever the bar covers, which
+    // is what pulls the camera back and shrinks the playfield a little.
+    const distV = (b.maxY - b.minY) / (1 - hidden) / 2 / Math.tan(vFov / 2);
     const hFov = 2 * Math.atan(Math.tan(vFov / 2) * aspect);
     const distH = (b.maxX - b.minX) / 2 / Math.tan(hFov / 2);
 
+    const dist = Math.max(distV, distH) * 1.05;
+    const halfHeight = dist * Math.tan(vFov / 2);
+    // Puts b.maxY exactly `hidden` of the way down the canvas — level with
+    // the bar's lower edge, plus the sliver of sky.
+    const cy = b.maxY - halfHeight * (1 - 2 * hidden);
+
     camera.aspect = aspect;
-    cameraHome.set(cx, cy, Math.max(distV, distH) * 1.05);
+    cameraHome.set(cx, cy, dist);
     camera.position.copy(cameraHome);
     camera.lookAt(cx, cy, 0);
     camera.updateProjectionMatrix();
+
+    // A waiting bird looks at the camera, so it has to be re-aimed whenever
+    // the camera moves.
+    if (bird && !bird.body) {
+      bird.mesh.rotation.set(0, facingCamera(bird.mesh.position), 0);
+    }
   }
 
   function resize() {
@@ -447,6 +558,7 @@ export function startGame(canvas) {
 
     slingshot.dispose();
     slingshot = new Slingshot(scene, materials, layout, quality, GRAVITY);
+    applyDotTheme();
 
     retireBird();
     fitCamera();
@@ -541,6 +653,13 @@ export function startGame(canvas) {
     }
     camera.position.lerp(camTarget, 1 - Math.pow(0.0016, delta));
 
+    // The world first, then the stand — and the bird waiting on it — over a
+    // cleared depth buffer, so the beam's posts can never swallow the stand.
+    renderer.clear();
+    camera.layers.set(0);
+    renderer.render(scene, camera);
+    renderer.clearDepth();
+    camera.layers.set(OVERLAY_LAYER);
     renderer.render(scene, camera);
   }
 
@@ -549,8 +668,8 @@ export function startGame(canvas) {
   /* ── opening hint ─────────────────────────────────────────── */
 
   const opener = quality.mobile
-    ? 'Drag back and let go'
-    : 'Drag back from the slingshot and release — or press Tab then space';
+    ? 'Drag back and let go — three solid hits break a crate'
+    : 'Drag back and release — three solid hits break a crate. Tab then space also works';
   say(opener, 7000);
 
   if (brokenCount() > 0) {

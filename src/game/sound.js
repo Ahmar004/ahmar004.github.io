@@ -89,6 +89,11 @@ export const sfx = {
   thud() {
     noise(0.13, 'lowpass', 320, 0.42, 0.11);
   },
+  /** Crate hit hard enough to crack, but still hanging. */
+  splinter() {
+    noise(0.22, 'highpass', 1700, 0.4, 0.16);
+    tone(340, 190, 0.14, 0.12, 'square');
+  },
   /** Crate destroyed. */
   crack() {
     noise(0.4, 'highpass', 1300, 0.55, 0.3);

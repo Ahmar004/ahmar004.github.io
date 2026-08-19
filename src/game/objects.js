@@ -91,11 +91,104 @@ export function signTexture(label, accent = '#ffd27f') {
   return tex;
 }
 
+/* ── crack decals ─────────────────────────────────────────────── */
+
+/**
+ * Damage cracks, drawn on a transparent canvas so they can be layered over
+ * a crate's wood without rebuilding its own texture.
+ *
+ * The paths are fixed and the jitter comes from a seeded generator, so the
+ * two-crack stage always contains the one-crack stage's line, unchanged:
+ * damage accumulates on screen instead of being redrawn each hit.
+ */
+const CRACK_PATHS = [
+  { x: 0.5, y: 0.06, angle: 1.5, len: 0.82 },
+  { x: 0.1, y: 0.4, angle: 0.24, len: 0.64 },
+  { x: 0.9, y: 0.92, angle: -2.1, len: 0.72 },
+];
+
+/** Tiny deterministic PRNG, so every crate cracks the same way. */
+function seeded(seed) {
+  return () => {
+    seed = (seed * 1664525 + 1013904223) % 4294967296;
+    return seed / 4294967296;
+  };
+}
+
+function drawCrack(g, size, spec, rand) {
+  const steps = 10;
+  const step = (spec.len * size) / steps;
+  const points = [];
+  let x = spec.x * size;
+  let y = spec.y * size;
+  let angle = spec.angle;
+
+  for (let i = 0; i <= steps; i++) {
+    points.push([x, y]);
+    angle += (rand() - 0.5) * 0.85;
+    x += Math.cos(angle) * step;
+    y += Math.sin(angle) * step;
+  }
+
+  const stroke = (pts, width, colour, dx = 0, dy = 0) => {
+    g.lineWidth = width;
+    g.strokeStyle = colour;
+    g.beginPath();
+    pts.forEach(([px, py], i) => (i ? g.lineTo(px + dx, py + dy) : g.moveTo(px + dx, py + dy)));
+    g.stroke();
+  };
+
+  stroke(points, 7, 'rgba(30,17,8,0.35)');          // bruised wood around the split
+  stroke(points, 2.6, 'rgba(11,6,3,0.95)');         // the split itself
+  stroke(points, 1, 'rgba(255,231,186,0.4)', 1.6, 1.6); // splintered edge catching light
+
+  // short splinters branching off the main line
+  for (let i = 2; i < points.length - 1; i += 3) {
+    const [px, py] = points[i];
+    const a = spec.angle + (rand() - 0.5) * 2.4;
+    const len = size * (0.05 + rand() * 0.07);
+    stroke([[px, py], [px + Math.cos(a) * len, py + Math.sin(a) * len]], 1.8, 'rgba(11,6,3,0.8)');
+  }
+}
+
+/** A transparent texture carrying the first `count` cracks. */
+export function crackTexture(count) {
+  const size = 256;
+  const c = document.createElement('canvas');
+  c.width = c.height = size;
+  const g = c.getContext('2d');
+  g.lineCap = 'round';
+  g.lineJoin = 'round';
+
+  const rand = seeded(20260819);
+  CRACK_PATHS.slice(0, count).forEach((spec) => drawCrack(g, size, spec, rand));
+
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.anisotropy = 4;
+  return tex;
+}
+
 /* ── shared materials ─────────────────────────────────────────── */
 
 export function createMaterials() {
   const wood = woodTexture();
+  // One crack for the first hit, three for the second — see CrateField.
+  const crackMaps = [crackTexture(1), crackTexture(3)];
+  const crackStages = crackMaps.map(
+    (map) =>
+      new THREE.MeshStandardMaterial({
+        map,
+        transparent: true,
+        roughness: 1,
+        metalness: 0,
+        depthWrite: false,
+        polygonOffset: true,
+        polygonOffsetFactor: -2,
+      })
+  );
   return {
+    crackStages,
     crate: new THREE.MeshStandardMaterial({ map: wood, roughness: 0.92, metalness: 0 }),
     beam: new THREE.MeshStandardMaterial({ color: 0x7a5230, roughness: 0.95 }),
     chain: new THREE.MeshStandardMaterial({ color: 0x8a8f9c, roughness: 0.45, metalness: 0.7 }),
@@ -105,6 +198,8 @@ export function createMaterials() {
     rubber: new THREE.MeshStandardMaterial({ color: 0x3b2418, roughness: 0.8 }),
     dispose() {
       wood.dispose();
+      crackMaps.forEach((m) => m.dispose());
+      crackStages.forEach((m) => m.dispose());
     },
   };
 }

@@ -106,10 +106,8 @@ a { color: inherit; }
   backdrop-filter: blur(18px);
   border-bottom: 1px solid var(--border);
   z-index: 100;
-  transform: translateY(-100%);
-  transition: transform 0.35s ease, background 0.4s ease;
+  transition: background 0.4s ease, border-color 0.4s ease;
 }
-.topbar.is-visible { transform: translateY(0); }
 
 .nav-brand {
   font-family: var(--display);
@@ -136,6 +134,32 @@ a { color: inherit; }
 }
 .nav-link:hover { color: var(--accent); background: var(--glow); }
 .nav-link.is-active { color: var(--accent); }
+
+/* Résumé download — the one nav item that is a call to action, so it is
+   outlined in the accent and keeps its full label at every width. */
+.nav-resume {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 0.45rem;
+  padding: 0.38rem 0.8rem;
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  letter-spacing: 0.03em;
+  white-space: nowrap;
+  text-decoration: none;
+  color: var(--accent);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--glow);
+  transition: background 0.2s, border-color 0.2s, transform 0.2s;
+}
+.nav-resume:hover {
+  background: var(--accent);
+  border-color: transparent;
+  color: #04121f;
+  transform: translateY(-1px);
+}
+html.light .nav-resume:hover { color: #fff; }
 
 .icon-btn {
   width: 36px;
@@ -810,7 +834,17 @@ html.light .contact-btn.is-primary:hover { color: #fff; }
 }
 
 @media (max-width: 640px) {
-  .topbar { padding: 0 1.1rem; }
+  .topbar { padding: 0 0.85rem; }
+  /* Tighter, but never abbreviated. */
+  .nav-resume {
+    margin-left: 0.3rem;
+    padding: 0.34rem 0.5rem;
+    font-size: 0.6rem;
+    letter-spacing: 0;
+  }
+  .icon-btn { width: 32px; height: 32px; }
+  .theme-btn { margin-left: 0.3rem; }
+
   .playfield-overlay { padding: calc(var(--topbar-h) + 1rem) 1.1rem 1.2rem; }
   .intro-blurb { display: none; }
   .playfield-overlay::before {

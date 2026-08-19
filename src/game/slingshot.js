@@ -10,6 +10,15 @@ import { segmentMesh, stretchBetween } from './objects.js';
 export const MAX_DRAW = 3.4;
 export const LAUNCH_SPEED = 9.2; // world units/sec per unit of draw
 
+/**
+ * Render layer for things that are drawn last, over a cleared depth buffer.
+ *
+ * The stand shares the z = 0 plane with the beam's posts, and in portrait the
+ * left prong sits inside one of them — geometrically behind it, and so
+ * swallowed whole. Nothing moves to fix that; the stand simply draws on top.
+ */
+export const OVERLAY_LAYER = 1;
+
 export class Slingshot {
   constructor(scene, materials, layout, quality, gravityY) {
     this.gravityY = gravityY;
@@ -89,7 +98,21 @@ export class Slingshot {
     this.dots.frustumCulled = false;
     this.group.add(this.dots);
 
+    // The whole stand rides the overlay layer. The trajectory preview stays
+    // on the default one, so the dots keep being occluded by whatever they
+    // fly behind, exactly as before.
+    this.group.traverse((o) => o.layers.set(OVERLAY_LAYER));
+    this.dots.layers.set(0);
+
     this.setPouch(this.rest);
+  }
+
+  /**
+   * Recolours the trajectory dots. White reads well against the dusk sky but
+   * disappears into the light theme's, so the caller swaps them for ink.
+   */
+  setDotColour(hex) {
+    this.dots.material.color.setHex(hex);
   }
 
   /** Clamps a world-space aim point to the slingshot's draw radius. */

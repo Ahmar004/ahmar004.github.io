@@ -32,8 +32,10 @@ export const LAYOUTS = {
       { id: 'education', x: 4.4, y: 5.5, z: 0 },
       { id: 'certificates', x: 7.3, y: 7.6, z: 0 },
       { id: 'contact', x: 10.0, y: 5.4, z: 0 },
-      // Only hung once the other six are down.
-      { id: 'beyond', x: 3.0, y: 10.6, z: -2.4 },
+      // Only hung once the other six are down. It has to share the z = 0
+      // plane with everything else: the bird flies in that plane and the
+      // beam lives in it, so any other z is both unhittable and unhung.
+      { id: 'beyond', x: 3.0, y: 11.2, z: 0 },
     ],
   },
   // Portrait is tall and narrow to match a phone's aspect: crates stack in
@@ -56,7 +58,7 @@ export const LAYOUTS = {
       { id: 'education', x: 2.2, y: 8.0, z: 0 },
       { id: 'certificates', x: -2.0, y: 5.0, z: 0 },
       { id: 'contact', x: 2.2, y: 5.4, z: 0 },
-      { id: 'beyond', x: 0.2, y: 12.8, z: -1.8 },
+      { id: 'beyond', x: 0, y: 13.0, z: 0 },
     ],
   },
 };

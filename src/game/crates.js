@@ -4,6 +4,12 @@
  * Each crate is a dynamic rigid body tethered to a static anchor on the beam
  * by a PointToPointConstraint, which makes it a real pendulum — near misses
  * set it swinging, and a solid hit sends it spinning into its neighbours.
+ *
+ * Crates do not shatter on the first solid hit. Each one takes three: the
+ * first splits it, the second spreads that split into three cracks, and only
+ * the third breaks it open. That is deliberate — a one-hit crate meant a
+ * ricochet or a flying shard could knock down a neighbour, and the page would
+ * scroll to a section the visitor never aimed at.
  */
 
 import * as THREE from 'three';
@@ -14,7 +20,16 @@ import { sections } from '../content.js';
 const DEFAULT_CRATE_SIZE = 2.0;
 const MIN_CHAIN = 1.2;
 const SIGN_DROP_RATIO = 0.21;
-const BREAK_IMPULSE = 5.5;
+/** Impact speed that counts as a solid hit rather than a graze. */
+const HIT_IMPULSE = 5.5;
+/** Solid hits a crate survives before it comes apart. */
+const HITS_TO_BREAK = 3;
+/**
+ * One impact arrives as a burst of contact events over several frames — the
+ * bird bounces, the crate swings back into it, shards clip it on the way out.
+ * Hits inside this window are all the same hit.
+ */
+const HIT_COOLDOWN_MS = 420;
 
 const _from = new THREE.Vector3();
 const _to = new THREE.Vector3();
@@ -30,7 +45,6 @@ export class CrateField {
     this.crates = [];
     this.debris = [];
     this.group = new THREE.Group();
-    this.hiddenRevealed = false;
     deps.scene.add(this.group);
 
     // Crates are smaller in portrait, where six of them share a phone screen.
@@ -42,37 +56,31 @@ export class CrateField {
     this.shardSize = this.size / 3.1;
     this.shardGeo = new THREE.BoxGeometry(this.shardSize, this.shardSize, this.shardSize * 0.55);
 
+    // Damage decals sit on a shell a hair outside the crate, so the cracks
+    // never fight the wood underneath for the same depth.
+    this.crackGeo = null;
+
     this.build();
   }
 
-  /**
-   * Builds the visible crates. Sections flagged `hidden` in content.js are
-   * held back until `revealHidden()` — they are the reward for clearing the
-   * board, not extra clutter on it.
-   */
-  build({ includeHidden = false, only = null } = {}) {
+  /** Hangs one crate per entry in the layout. Every crate is on the board
+   *  from the first frame — none are held back. */
+  build() {
     const { world, materials, layout, quality } = this.deps;
     this.size = layout.crateSize ?? DEFAULT_CRATE_SIZE;
     this.signScale = layout.signScale ?? 1;
     this.signDrop = this.size * SIGN_DROP_RATIO;
 
+    // Rebuilt with the field, because a relayout changes the crate size.
+    this.crackGeo?.dispose();
+    const shell = this.size * 1.008;
+    this.crackGeo = new THREE.BoxGeometry(shell, shell, shell);
+
     layout.crates.forEach((spot) => {
       const section = sections.find((s) => s.id === spot.id);
       if (!section) return;
-      if (only && spot.id !== only) return;
-      if (!only && section.hidden && !includeHidden) return;
       this.crates.push(this.#makeCrate(spot, section, world, materials, quality, layout));
     });
-  }
-
-  /** Drops in the easter-egg crate once the labelled six are gone. */
-  revealHidden() {
-    const hidden = sections.find((s) => s.hidden);
-    if (!hidden) return false;
-    if (this.crates.some((c) => c.id === hidden.id)) return false;
-    this.build({ only: hidden.id });
-    this.hiddenRevealed = true;
-    return true;
   }
 
   #makeCrate(spot, section, world, materials, quality, layout) {
@@ -162,6 +170,9 @@ export class CrateField {
       constraint,
       anchorPos,
       broken: false,
+      hits: 0,
+      lastHitAt: 0,
+      cracks: null,
     };
 
     body.addEventListener('collide', (event) => {
@@ -172,8 +183,8 @@ export class CrateField {
       if (!other.userData?.isProjectile) return;
 
       const impact = Math.abs(event.contact.getImpactVelocityAlongNormal());
-      if (impact >= BREAK_IMPULSE) {
-        this.break(crate, other.velocity);
+      if (impact >= HIT_IMPULSE) {
+        this.#takeHit(crate, other.velocity);
       } else if (impact > 1.4) {
         this.deps.onGraze?.(impact);
       }
@@ -182,8 +193,53 @@ export class CrateField {
     return crate;
   }
 
-  /** Destroys a crate, scatters debris, and notifies the caller. */
-  break(crate, impactVelocity) {
+  /**
+   * Books one solid hit against a crate: cracks it, or breaks it if this was
+   * the third. Repeat contacts from the same impact are ignored.
+   */
+  #takeHit(crate, impactVelocity) {
+    const now = performance.now();
+    if (now - crate.lastHitAt < HIT_COOLDOWN_MS) return;
+    crate.lastHitAt = now;
+    crate.hits += 1;
+
+    if (crate.hits >= HITS_TO_BREAK) {
+      this.break(crate, impactVelocity);
+      return;
+    }
+
+    this.#showCracks(crate);
+    this.deps.onDamage?.(crate, {
+      hits: crate.hits,
+      left: HITS_TO_BREAK - crate.hits,
+    });
+  }
+
+  /** Lays the damage decal for the crate's current hit count over its faces. */
+  #showCracks(crate) {
+    const stage = this.deps.materials.crackStages[crate.hits - 1];
+    if (!stage) return;
+
+    if (crate.cracks) {
+      crate.cracks.material = stage;
+    } else {
+      crate.cracks = new THREE.Mesh(this.crackGeo, stage);
+      // A child of the crate, so it swings and spins with it for free.
+      crate.mesh.add(crate.cracks);
+    }
+    // Split wood reads darker even where the cracks themselves don't land.
+    crate.mesh.material.color.multiplyScalar(0.88);
+  }
+
+  /**
+   * Destroys a crate, scatters debris, and notifies the caller.
+   *
+   * `silent` restores a crate that was already down on a previous visit:
+   * it is removed from the board with no debris, no sound and no scroll,
+   * because nothing just happened — the page is only catching up to saved
+   * progress.
+   */
+  break(crate, impactVelocity, { silent = false } = {}) {
     if (crate.broken) return;
     crate.broken = true;
 
@@ -195,6 +251,11 @@ export class CrateField {
     world.removeBody(crate.anchorBody);
 
     this.#disposeVisuals(crate, { keepHook: true });
+
+    if (silent) {
+      this.onBreak(crate, { silent: true });
+      return;
+    }
 
     /* debris */
     const count = quality.debrisPerCrate;
@@ -239,7 +300,7 @@ export class CrateField {
       this.debris.push({ mesh: shard, body, born: performance.now(), mat });
     }
 
-    this.onBreak(crate);
+    this.onBreak(crate, { silent: false });
   }
 
   #disposeVisuals(crate, { keepHook = false } = {}) {
@@ -252,6 +313,12 @@ export class CrateField {
         obj.material.dispose();
       }
     };
+    // The decal's geometry and material are shared with the rest of the
+    // field, so it is only detached here — never disposed.
+    if (crate.cracks) {
+      crate.mesh.remove(crate.cracks);
+      crate.cracks = null;
+    }
     kill(crate.mesh);
     kill(crate.sign);
     crate.signRopes.forEach(kill);
@@ -333,13 +400,12 @@ export class CrateField {
     });
     this.crates = [];
     this.debris = [];
-    // A revealed easter-egg crate stays part of the board across resets.
-    this.build({ includeHidden: this.hiddenRevealed === true });
+    this.build();
   }
 
-  /** Labelled crates still hanging. The easter egg does not count. */
+  /** Crates still hanging. */
   get remaining() {
-    return this.crates.filter((c) => !c.broken && !c.section.hidden).length;
+    return this.crates.filter((c) => !c.broken).length;
   }
 
   dispose() {
@@ -356,6 +422,7 @@ export class CrateField {
       d.mat.dispose();
     });
     this.shardGeo.dispose();
+    this.crackGeo?.dispose();
     this.deps.scene.remove(this.group);
   }
 }

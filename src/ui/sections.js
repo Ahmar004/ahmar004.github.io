@@ -184,10 +184,7 @@ export function renderSections(root) {
 }
 
 export function renderNav(desktopRoot, mobileRoot) {
-  const links = sections
-    .filter((s) => !s.hidden)
-    .map((s) => ({ id: s.id, label: s.label }));
-  links.push({ id: 'beyond', label: 'BEYOND CODE' });
+  const links = sections.map((s) => ({ id: s.id, label: s.label }));
 
   const hamburger = desktopRoot.querySelector('#hamburger');
   links.forEach((l) => {
@@ -198,6 +195,15 @@ export function renderNav(desktopRoot, mobileRoot) {
     desktopRoot.insertBefore(a, hamburger);
   });
 
+  // Résumé stays in the bar at every width, label and all — it is the one
+  // thing a visitor may want without reading anything else first.
+  const resume = document.createElement('a');
+  resume.className = 'nav-resume';
+  resume.href = profile.resume;
+  resume.setAttribute('download', '');
+  resume.textContent = 'Download Resume';
+  desktopRoot.insertBefore(resume, hamburger);
+
   mobileRoot.innerHTML = links
     .map((l) => `<a class="mobile-link" href="#${l.id}">${esc(l.label)}</a>`)
     .join('');
@@ -207,5 +213,5 @@ export function renderIntro() {
   const blurb = document.getElementById('introBlurb');
   if (blurb) blurb.textContent = profile.blurb;
   const total = document.getElementById('totalCount');
-  if (total) total.textContent = String(sections.filter((s) => !s.hidden).length);
+  if (total) total.textContent = String(sections.length);
 }
