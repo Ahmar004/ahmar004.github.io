@@ -1,0 +1,8 @@
+# Normalise line endings: authored on Windows, built on Ubuntu in CI.
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.pdf binary
+*.woff binary
+*.woff2 binary
